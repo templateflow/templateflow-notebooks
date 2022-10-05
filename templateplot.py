@@ -141,68 +141,64 @@ def get_image_and_mask(tpl):
     """
     Fetch an image and a mask for plotting a template.
     """
+
+    if tpl in ("fsaverage", "fsLR"):
+        surf_query = {
+            "template": tpl,
+            "hemi": "R",
+            "density": ["10k", "32k"],
+            "desc": None,
+            "space": None,
+        }
+        priority_list_surf = ("inflated", "pial", "sphere")
+        return search_for_surfaces(surf_query, "suffix", priority_list_surf)
+
     priority_list_vol = ("T1w", "T2w", "T1map", "T2star", "PDw")
-    priority_list_surf = ("inflated", "pial", "sphere")
-    # TODO: this spec iteration is inflexible and brittle.
-    # Consider changing to a more principled system at some point.
-    specification = [
-        [],
-        [("resolution", 1)],
-        [("resolution", 1), ("cohort", 1)],
-        [("cohort", 1)],
-        [("desc", "brain")],
-    ]
-    img_query = {"template": tpl, "desc": None}
-    mask_query = {
+    img_query = {
         "template": tpl,
-        "desc": "brain",
-        "hemi": None,
-        "space": None,
-        "atlas": None,
-        "suffix": "mask",
-    }
-    surf_query = {
-        "template": tpl,
-        "hemi": "R",
-        "density": ["10k", "32k"],
-        "desc": None,
-        "space": None,
+        "cohort": [None, 1],
+        "resolution": [None, 1],
     }
 
     tpl_img_path = []
-    tpl_img_path = search_for_images(
-        img_query, specification, "suffix", priority_list_vol
-    )
-    tpl_mask_path = search_for_images(mask_query, specification)
+    tpl_mask_path = None
+    for suffix in priority_list_vol:
+        tpl_img_path = tflow.get(**img_query, suffix=suffix, desc=None)
 
-    if isinstance(tpl_img_path, list):
-        tpl_img = search_for_surfaces(surf_query, "suffix", priority_list_surf)
-        tpl_mask = "surf"
-        return tpl_img, tpl_mask
+        if not tpl_img_path:
+            tpl_img_path = tflow.get(**img_query, suffix=suffix, desc="brain")
 
-    if isinstance(tpl_img_path, list):
-        raise ValueError(f"Ambiguous or no reference {tpl_img_path}")
-    if isinstance(tpl_mask_path, list):
-        tpl_mask_path = None
-        tpl_mask = None
+        tpl_mask_path = (
+            tflow.get(**img_query, suffix="mask", desc="brain", hemi=None, atlas=None)
+            or None
+        )
+
+        if isinstance(tpl_mask_path, list):
+            tpl_mask_path = tpl_mask_path[0]
+
+        if tpl_img_path:
+            break
+
+    if tpl_img_path and isinstance(tpl_img_path, list):
+        tpl_img_path = tpl_img_path[0]
 
     tpl_img = nb.load(tpl_img_path).get_fdata()
     if tpl_mask_path is not None:
-        tpl_mask = nb.load(tpl_mask_path).get_fdata()
+        tpl_mask = np.asanyarray(nb.load(tpl_mask_path).dataobj) > 0.0
         # mask and template dimension mismatch: skip masking
-        if tpl_img.shape != tpl_mask.shape:
-            tpl_mask = None
+        if tpl_img.shape == tpl_mask.shape:
+            tpl_img[~tpl_mask] = 0.0
 
-    return tpl_img, tpl_mask
+    return tpl_img
 
 
 def template_view(tpl, ax):
     """
     Obtain a view on a template.
     """
-    tpl_img, tpl_mask = get_image_and_mask(tpl)
+    tpl_img = get_image_and_mask(tpl)
 
-    if isinstance(tpl_mask, str) and tpl_mask == "surf":
+    if tpl in ("fsaverage", "fsLR"):
         ax.set_facecolor("black")
         plot_surf(
             surf_mesh=str(tpl_img),
@@ -212,14 +208,11 @@ def template_view(tpl, ax):
             engine="matplotlib",
         )
         return
-    elif tpl_mask is not None:
-        masked = tpl_img * tpl_mask
-    else:
-        masked = tpl_img
+
     # some templates, like RESILIENT, have a lot of negative
     # values, so we'll use the absolute value to select a good slice
-    slc_idx = np.abs(masked).sum((0, 1)).argmax()
-    slc = np.flipud(masked[:, :, slc_idx].T)
+    slc_idx = np.abs(tpl_img).sum((0, 1)).argmax()
+    slc = np.flipud(tpl_img[:, :, slc_idx].T)
     slc = slc[(np.abs(slc).sum(1) > 0), :]
     slc = slc[:, (np.abs(slc).sum(0) > 0)]
     y, x = slc.shape
